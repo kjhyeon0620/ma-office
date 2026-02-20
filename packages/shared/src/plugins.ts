@@ -25,6 +25,9 @@ export type StageContext = {
   runId: string;
   stageName: string;
   goal: string;
+  projectPath: string;
+  config: Record<string, unknown>;
+  emit: (event: RunEvent) => Promise<void>;
 };
 
 export type StagePlugin = PluginBase & {
@@ -65,6 +68,7 @@ export type RunState = {
   runId: string;
   stage: string;
   events: RunEvent[];
+  goal: string;
 };
 
 export type PolicyResult = {

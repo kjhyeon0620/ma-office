@@ -39,7 +39,7 @@ program
     const configRaw = await readFile(configPath, "utf8").catch(() => "");
     const config = { ...DEFAULT_PROJECT_CONFIG, ...(YAML.parse(configRaw) ?? {}) } as ProjectConfig;
 
-    await loadPlugins({ projectPath, npmPlugins: config.plugins?.npm });
+    const registry = await loadPlugins({ projectPath, npmPlugins: config.plugins?.npm });
 
     const runDir = join(projectPath, "runs", runId);
     await mkdir(runDir, { recursive: true });
@@ -53,7 +53,8 @@ program
       goal: opts.goal,
       config,
       logger,
-      codexMock: Boolean(opts.codexMock)
+      codexMock: Boolean(opts.codexMock),
+      registry
     });
 
     console.log(`Run complete: ${runId}`);
