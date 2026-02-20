@@ -30,4 +30,22 @@ describe("RunEvent schema", () => {
       })
     ).toThrow();
   });
+
+  it("parses valid agent note event", () => {
+    const parsed = parseRunEvent({
+      id: "2",
+      runId: "run-1",
+      ts: new Date().toISOString(),
+      level: "info",
+      type: "agent_note",
+      stage: "IMPLEMENT",
+      agentId: "implement-agent",
+      payload: {
+        noteType: "plan",
+        message: "Apply minimal diff and verify with tests."
+      }
+    });
+
+    expect(parsed.type).toBe("agent_note");
+  });
 });

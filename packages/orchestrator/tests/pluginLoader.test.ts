@@ -26,4 +26,36 @@ describe("plugin loader", () => {
     expect(registry.list()).toHaveLength(2);
     expect(registry.list()[1]?.name).toBe("sample-stage");
   });
+
+  it("loads npm-referenced plugin from project dependencies", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "ma-office-npm-plugin-"));
+    await writeFile(join(projectDir, "package.json"), JSON.stringify({ name: "tmp-project", private: true }), "utf8");
+
+    const pkgDir = join(projectDir, "node_modules", "@acme", "office-plugin");
+    await mkdir(pkgDir, { recursive: true });
+    await writeFile(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@acme/office-plugin",
+        type: "module",
+        exports: "./index.mjs"
+      }),
+      "utf8"
+    );
+    await writeFile(
+      join(pkgDir, "index.mjs"),
+      `export default {
+        name: "npm-policy",
+        apiVersion: "v1",
+        kind: "policy",
+        policyName: "npm-policy",
+        evaluate: async () => ({ pass: true })
+      };`,
+      "utf8"
+    );
+
+    const registry = await loadPlugins({ projectPath: projectDir, npmPlugins: ["@acme/office-plugin"] });
+    const names = registry.list().map((plugin) => plugin.name);
+    expect(names).toContain("npm-policy");
+  });
 });

@@ -12,6 +12,7 @@ import { DEFAULT_PROJECT_CONFIG, type ProjectConfig } from "./types.js";
 import { runDefaultPipeline } from "./workflow/defaultPipeline.js";
 
 const program = new Command();
+const invocationCwd = process.env.INIT_CWD ?? process.cwd();
 
 program.name("ma-office").description("Reusable multi-agent office").version("0.1.0");
 
@@ -19,7 +20,7 @@ program
   .command("init")
   .option("--project <path>", "Target project path", ".")
   .action(async (opts) => {
-    const projectPath = resolve(process.cwd(), opts.project);
+    const projectPath = resolve(invocationCwd, opts.project);
     await installPresets(projectPath);
     console.log(`Initialized ma-office presets in ${projectPath}`);
   });
@@ -32,7 +33,7 @@ program
   .option("--run-id <id>", "optional run id")
   .option("--codex-mock", "Use mock Codex MCP integration", true)
   .action(async (opts) => {
-    const projectPath = resolve(process.cwd(), opts.project);
+    const projectPath = resolve(invocationCwd, opts.project);
     const configPath = resolve(projectPath, opts.config);
     const runId = opts.runId ?? `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
 
@@ -65,10 +66,14 @@ program
   .option("--project <path>", "Project root", ".")
   .option("--port <number>", "Port", "3000")
   .action(async (opts) => {
-    const projectPath = resolve(process.cwd(), opts.project);
-    const proc = spawn("pnpm", ["--filter", "@ma-office/dashboard", "dev", "--", "-p", String(opts.port)], {
+    const projectPath = resolve(invocationCwd, opts.project);
+    const proc = spawn("pnpm", ["--filter", "@ma-office/dashboard", "dev", "-p", String(opts.port)], {
       cwd: projectPath,
-      stdio: "inherit"
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        MA_OFFICE_PROJECT_ROOT: projectPath
+      }
     });
 
     proc.on("exit", (code) => {
