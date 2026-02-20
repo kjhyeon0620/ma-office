@@ -17,3 +17,4 @@ Reusable, project-agnostic multi-agent office for software development.
 - Table View: compact run list table
 
 See `QUICKSTART.md` for a full setup.
+For runtime mode and Codex MCP env configuration, see `.env.example`.
