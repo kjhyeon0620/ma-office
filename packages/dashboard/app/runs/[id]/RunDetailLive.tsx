@@ -1,11 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import type { RunEvent } from "@ma-office/shared";
 import type { RunDetail } from "../../../lib/runs";
-import AgentConsole from "./AgentConsole";
+import AgentRoomPanel from "./AgentRoomPanel";
+import CrewDeck from "./CrewDeck";
+import LogConsolePanel from "./LogConsolePanel";
+import OfficeCanvas from "./OfficeCanvas";
+import SummaryWidgets from "./SummaryWidgets";
+import { getAgentViewModels, getRunMode, getWarningCount } from "../../../lib/agentViewModel";
 
 type LiveMode = "idle" | "sse" | "reconnecting" | "polling";
+type RunView = "office" | "console";
 
 type TailResponse = {
   events: RunEvent[];
@@ -56,11 +63,12 @@ async function fetchTail(runId: string, cursor: number): Promise<TailResponse> {
   return (await response.json()) as TailResponse;
 }
 
-export default function RunDetailLive({ initialRun }: { initialRun: RunDetail }) {
+export default function RunDetailLive({ initialRun, initialView }: { initialRun: RunDetail; initialView: RunView }) {
   const runId = initialRun.runId;
   const [run, setRun] = useState<RunDetail>(initialRun);
   const [liveEnabled, setLiveEnabled] = useState(true);
   const [mode, setMode] = useState<LiveMode>("idle");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(undefined);
 
   const cursorRef = useRef(initialRun.cursor);
   const sourceRef = useRef<EventSource | null>(null);
@@ -230,31 +238,38 @@ export default function RunDetailLive({ initialRun }: { initialRun: RunDetail })
     };
   }, [liveEnabled, runId]);
 
-  const costs = useMemo(() => run.events.filter((event: RunEvent) => event.type === "cost_update"), [run.events]);
-  const totalCost = useMemo(
-    () => costs.reduce((sum: number, event: RunEvent) => sum + Number((event.payload as { estimatedCost?: number }).estimatedCost ?? 0), 0),
-    [costs]
-  );
-  const stages = useMemo(
-    () => run.events.filter((event: RunEvent) => event.type === "stage_started" || event.type === "stage_finished"),
-    [run.events]
-  );
   const goal = useMemo(
     () => String((run.events.find((event: RunEvent) => event.type === "run_started")?.payload as { goal?: string })?.goal ?? "(unknown)"),
     [run.events]
   );
+  const totalCost = useMemo(
+    () =>
+      run.events
+        .filter((event: RunEvent) => event.type === "cost_update")
+        .reduce((sum: number, event: RunEvent) => sum + Number((event.payload as { estimatedCost?: number }).estimatedCost ?? 0), 0),
+    [run.events]
+  );
+
+  const connectionState = useMemo(() => (liveEnabled ? mode : "paused"), [liveEnabled, mode]);
+  const agents = useMemo(() => getAgentViewModels(run.events, connectionState), [run.events, connectionState]);
+  const modeLabel = useMemo(() => getRunMode(run.events), [run.events]);
+  const warningCount = useMemo(() => getWarningCount(run.events), [run.events]);
+  const artifactCount = useMemo(() => run.events.filter((event) => event.type === "artifact_created").length, [run.events]);
+  const view = initialView;
+
+  const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
 
   return (
     <>
       <section className="hero">
         <div className="hero-toolbar">
           <div>
-            <h1>Run {runId}</h1>
+            <h1>Agent Office · Run {runId}</h1>
             <p>Goal: {goal}</p>
-            <p>Total cost: {totalCost}</p>
+            <p>Mode: {modeLabel}</p>
           </div>
           <div className="live-controls">
-            <div className="live-state">Live: {mode}</div>
+            <div className="live-state">Connection: {liveEnabled ? mode : "paused"}</div>
             <button className="live-toggle" type="button" onClick={() => setLiveEnabled((current) => !current)}>
               {liveEnabled ? "Live On" : "Live Off"}
             </button>
@@ -262,40 +277,52 @@ export default function RunDetailLive({ initialRun }: { initialRun: RunDetail })
         </div>
       </section>
 
-      <AgentConsole
-        events={run.events.map((event: RunEvent) => ({
-          id: event.id,
-          ts: event.ts,
-          type: event.type,
-          stage: event.stage,
-          agentId: event.agentId,
-          payload: (event.payload ?? {}) as Record<string, unknown>
-        }))}
+      <section className="view-tabs" aria-label="Run views">
+        <Link href={`/runs/${runId}?view=office`} className={`view-tab ${view === "office" ? "view-tab-active" : ""}`}>
+          Office View
+        </Link>
+        <Link href={`/runs/${runId}?view=console`} className={`view-tab ${view === "console" ? "view-tab-active" : ""}`}>
+          Console View
+        </Link>
+      </section>
+
+      <SummaryWidgets
+        totalEvents={run.events.length}
+        totalArtifacts={artifactCount}
+        totalCost={totalCost}
+        warnings={warningCount}
+        mode={modeLabel}
+        liveMode={mode}
+        liveEnabled={liveEnabled}
       />
 
-      <section className="panel">
-        <h2 className="panel-title">Stage Timeline</h2>
-        <div className="timeline">
-          {stages.map((event: RunEvent) => (
-            <div key={event.id} className="timeline-item">
-              <span className="timeline-ts">{new Date(event.ts).toLocaleTimeString()}</span>
-              <span className="timeline-type">{event.type}</span>
-              <span className="timeline-stage">{event.stage}</span>
+      {view === "office" ? (
+        <>
+          <OfficeCanvas agents={agents} selectedAgentId={selectedAgentId} onSelect={setSelectedAgentId} />
+          {selectedAgent ? (
+            <div className="room-modal-backdrop" onClick={() => setSelectedAgentId(undefined)}>
+              <div className="room-modal-shell" onClick={(event) => event.stopPropagation()}>
+                <AgentRoomPanel
+                  agent={selectedAgent}
+                  events={run.events}
+                  onClose={() => setSelectedAgentId(undefined)}
+                  focusHref={`/runs/${runId}?view=console`}
+                />
+              </div>
             </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel panel-grid">
-        <div>
-          <h2 className="panel-title">Registered Tools</h2>
-          <pre className="json-block">{JSON.stringify(run.registeredTools, null, 2)}</pre>
-        </div>
-        <div>
-          <h2 className="panel-title">Widget Panels</h2>
-          <pre className="json-block">{JSON.stringify(run.widgetPanels, null, 2)}</pre>
-        </div>
-      </section>
+          ) : null}
+        </>
+      ) : (
+        <section className="detail-grid">
+          <div>
+            <CrewDeck agents={agents} selectedAgentId={selectedAgentId} onSelect={setSelectedAgentId} />
+            <LogConsolePanel events={run.events} agents={agents} selectedAgentId={selectedAgentId} />
+          </div>
+          <div>
+            <AgentRoomPanel agent={selectedAgent} events={run.events} onClose={() => setSelectedAgentId(undefined)} focusHref={`/runs/${runId}?view=console`} />
+          </div>
+        </section>
+      )}
     </>
   );
 }

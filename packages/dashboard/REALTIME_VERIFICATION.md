@@ -18,9 +18,10 @@
 4. Open run detail page (`/runs/<runId>`).
 5. Confirm `Live On` state is `sse`.
 6. Validate these update immediately on new events:
-- Agent Crew Deck status chips
-- Agent Console lines
-- Stage Timeline entries
+- Office Canvas agent tiles (status/task/last update/progress)
+- Crew Deck cards
+- Agent Room panel (recent events/artifacts)
+- Console & Timeline panel
 
 ## Scenario B: Auto reconnect with backoff
 1. Keep run detail page open with `Live On`.
@@ -38,3 +39,12 @@
 1. Toggle to `Live Off`.
 2. Confirm live state becomes `idle` and new events no longer auto-appear.
 3. Toggle back to `Live On` and verify updates resume.
+
+## Scenario E: Filters + raw toggle
+1. On run detail, use filters by agent/stage/type and verify log list changes.
+2. Confirm default message mode is human-readable.
+3. Toggle `Raw` and confirm payload JSON appears.
+
+## Scenario F: Mode indicator
+1. Verify summary card includes `Run Mode`.
+2. For current mock pipeline, expected value is `mock` (or `unknown` if no cost event yet).

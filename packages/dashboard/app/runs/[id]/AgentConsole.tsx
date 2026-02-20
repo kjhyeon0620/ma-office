@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { formatEventTime } from "../../../lib/time";
 
 type EventItem = {
   id: string;
@@ -173,7 +174,7 @@ export default function AgentConsole({ events }: { events: EventItem[] }) {
             const noteDetails = log.type === "agent_note" ? renderNoteDetails(log.payload ?? {}) : "";
             return (
               <div key={log.id} className="console-line">
-                <span className="console-ts">{new Date(log.ts).toLocaleTimeString()}</span>
+                <span className="console-ts">{formatEventTime(log.ts)}</span>
                 <span className="console-type">{formatted.label}</span>
                 <span className="console-msg">
                   {formatted.message}

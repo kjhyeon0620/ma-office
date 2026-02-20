@@ -12,4 +12,8 @@ Reusable, project-agnostic multi-agent office for software development.
 - `pnpm --filter @ma-office/orchestrator dev -- run --goal "Implement feature" --project . --config project.yaml`
 - `pnpm --filter @ma-office/orchestrator dev -- dashboard --project . --port 3000`
 
+## Dashboard UI Modes
+- Office View: avatar/room-oriented realtime agent status view
+- Table View: compact run list table
+
 See `QUICKSTART.md` for a full setup.
