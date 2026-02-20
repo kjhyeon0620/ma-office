@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "echo \"No dashboard tests in PR1\"",
+    "test": "vitest run",
     "lint": "next lint"
   },
   "dependencies": {
