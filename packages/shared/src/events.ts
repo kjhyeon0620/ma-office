@@ -5,6 +5,7 @@ export const EventTypeSchema = z.enum([
   "run_finished",
   "agent_spawned",
   "agent_status",
+  "agent_note",
   "stage_started",
   "stage_finished",
   "tool_call_started",
@@ -39,6 +40,19 @@ const AgentStatusEventSchema = EventBaseSchema.extend({
   payload: z.object({
     status: AgentStatusSchema,
     message: z.string().optional()
+  })
+});
+
+const AgentNoteEventSchema = EventBaseSchema.extend({
+  type: z.literal("agent_note"),
+  payload: z.object({
+    noteType: z.enum(["hypothesis", "plan", "decision", "result", "context", "action"]),
+    message: z.string(),
+    problem: z.string().optional(),
+    options: z.array(z.string()).optional(),
+    chosen: z.string().optional(),
+    why: z.string().optional(),
+    evidence: z.array(z.string()).optional()
   })
 });
 
@@ -84,6 +98,7 @@ export const RunEventSchema = z.union([
   GenericEventSchema,
   AgentSpawnedSchema,
   AgentStatusEventSchema,
+  AgentNoteEventSchema,
   ToolCallEventSchema,
   ArtifactEventSchema,
   CostEventSchema

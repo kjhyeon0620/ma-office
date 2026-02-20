@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { PLUGIN_API_VERSION, type OfficePlugin } from "@ma-office/shared";
 import { PluginRegistry } from "./registry.js";
@@ -31,6 +32,20 @@ function validate(plugin: OfficePlugin): void {
   }
 }
 
+function isPathLike(specifier: string): boolean {
+  return specifier.startsWith(".") || specifier.startsWith("/") || specifier.endsWith(".js") || specifier.endsWith(".mjs");
+}
+
+async function importPluginModule(projectPath: string, specifier: string): Promise<unknown> {
+  if (isPathLike(specifier)) {
+    return import(pathToFileURL(resolve(projectPath, specifier)).href);
+  }
+
+  const requireFromProject = createRequire(join(projectPath, "package.json"));
+  const resolved = requireFromProject.resolve(specifier);
+  return import(pathToFileURL(resolved).href);
+}
+
 export async function loadPlugins(opts: LoadPluginOptions): Promise<PluginRegistry> {
   const registry = new PluginRegistry();
   for (const plugin of builtInPlugins) {
@@ -49,9 +64,19 @@ export async function loadPlugins(opts: LoadPluginOptions): Promise<PluginRegist
   }
 
   if (opts.npmPlugins?.length) {
-    // PR1 scope control: npm plugin loading interface is stable, implementation is a stub.
-    for (const pkg of opts.npmPlugins) {
-      console.warn(`[ma-office] npm plugin loading is stubbed in PR1: ${pkg}`);
+    for (const specifier of opts.npmPlugins) {
+      try {
+        const mod = await importPluginModule(opts.projectPath, specifier);
+        for (const plugin of normalize(mod)) {
+          validate(plugin);
+          registry.add(plugin);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `[ma-office] failed to load npm plugin '${specifier}'. Ensure it is installed in the target project. Reason: ${reason}`
+        );
+      }
     }
   }
 

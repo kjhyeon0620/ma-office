@@ -1,4 +1,4 @@
-import type { RunEvent } from "./events.js";
+import type { RunEvent } from "./events";
 
 export const PLUGIN_API_VERSION = "v1" as const;
 
@@ -11,13 +11,18 @@ export type PluginBase = {
 
 export type RoleContext = {
   runId: string;
+  stageName: string;
   goal: string;
+  projectPath: string;
+  config: Record<string, unknown>;
+  tools: Record<string, Record<string, unknown>>;
   emit: (event: RunEvent) => Promise<void>;
 };
 
 export type RolePlugin = PluginBase & {
   kind: "role";
   roleName: string;
+  replaceDefault?: boolean;
   createAgent: (context: RoleContext) => Promise<void>;
 };
 
@@ -27,6 +32,7 @@ export type StageContext = {
   goal: string;
   projectPath: string;
   config: Record<string, unknown>;
+  tools: Record<string, Record<string, unknown>>;
   emit: (event: RunEvent) => Promise<void>;
 };
 

@@ -1,2 +1,2 @@
-export * from "./events.js";
-export * from "./plugins.js";
+export * from "./events";
+export * from "./plugins";

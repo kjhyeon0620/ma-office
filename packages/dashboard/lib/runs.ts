@@ -12,7 +12,22 @@ export type RunSummary = {
   artifacts: string[];
 };
 
-const ROOT = resolve(process.cwd(), "runs");
+export type RunDetail = {
+  runId: string;
+  events: RunEvent[];
+  artifacts: {
+    path: string;
+    artifactType: string;
+    summary: string;
+  }[];
+  registeredTools: Record<string, Record<string, unknown>>;
+  widgetPanels: {
+    widgetName: string;
+    data: Record<string, unknown>;
+  }[];
+};
+
+const ROOT = resolve(process.env.MA_OFFICE_PROJECT_ROOT ?? process.cwd(), "runs");
 
 async function readEvents(runId: string): Promise<RunEvent[]> {
   const file = join(ROOT, runId, "events.jsonl");
@@ -21,6 +36,31 @@ async function readEvents(runId: string): Promise<RunEvent[]> {
     .split("\n")
     .filter(Boolean)
     .map((line) => parseRunEvent(JSON.parse(line)));
+}
+
+async function readRegisteredTools(runId: string, artifactPath?: string): Promise<Record<string, Record<string, unknown>>> {
+  if (!artifactPath) {
+    return {};
+  }
+
+  const full = resolve(ROOT, "..", artifactPath);
+  const raw = await readFile(full, "utf8").catch(() => "");
+  if (!raw) {
+    return {};
+  }
+
+  const parsed = JSON.parse(raw) as unknown;
+  return typeof parsed === "object" && parsed ? (parsed as Record<string, Record<string, unknown>>) : {};
+}
+
+async function readWidgetPanel(artifactPath: string): Promise<Record<string, unknown>> {
+  const full = resolve(ROOT, "..", artifactPath);
+  const raw = await readFile(full, "utf8").catch(() => "");
+  if (!raw) {
+    return {};
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  return typeof parsed === "object" && parsed ? (parsed as Record<string, unknown>) : {};
 }
 
 export async function getRunSummaries(): Promise<RunSummary[]> {
@@ -58,7 +98,29 @@ export async function getRunSummaries(): Promise<RunSummary[]> {
   return summaries.sort((a, b) => (a.startedAt && b.startedAt ? b.startedAt.localeCompare(a.startedAt) : 0));
 }
 
-export async function getRunDetail(runId: string): Promise<{ runId: string; events: RunEvent[] }> {
+export async function getRunDetail(runId: string): Promise<RunDetail> {
   const events = await readEvents(runId);
-  return { runId, events };
+  const artifacts = events
+    .filter((event) => event.type === "artifact_created")
+    .map((event) => {
+      const payload = event.payload as { path?: string; artifactType?: string; summary?: string };
+      return {
+        path: String(payload.path ?? ""),
+        artifactType: String(payload.artifactType ?? "unknown"),
+        summary: String(payload.summary ?? "")
+      };
+    });
+
+  const toolsArtifact = artifacts.find((artifact) => artifact.artifactType === "registered_tools");
+  const registeredTools = await readRegisteredTools(runId, toolsArtifact?.path);
+  const widgetPanels = await Promise.all(
+    artifacts
+      .filter((artifact) => artifact.artifactType === "widget")
+      .map(async (artifact) => ({
+        widgetName: artifact.path.split("/").pop()?.replace(/^widget_/, "").replace(/\.json$/, "") ?? "unknown",
+        data: await readWidgetPanel(artifact.path)
+      }))
+  );
+
+  return { runId, events, artifacts, registeredTools, widgetPanels };
 }

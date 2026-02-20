@@ -22,3 +22,13 @@
 ## Notes
 - PR1 uses file-based JSONL events in `runs/<runId>/events.jsonl`.
 - MCP/Codex integration is mockable via `--codex-mock`.
+- To enable a sample tool plugin, copy:
+  `cp .ma-office/plugins/sample-tool.example.mjs .ma-office/plugins/sample-tool.mjs`
+- To load npm plugins, add package names in `project.yaml`:
+  `plugins: { npm: ["@your-scope/ma-office-plugin"] }`
+- To enable a sample widget plugin, copy:
+  `cp .ma-office/plugins/sample-widget.example.mjs .ma-office/plugins/sample-widget.mjs`
+- Policy guardrails can be set in `project.yaml`:
+  `policies: { forbidden_stages: ["REVIEW"], require_test_stage_before_github: true }`
+- Retry per stage can be set with:
+  `policies: { max_retries_per_stage: 1 }`
