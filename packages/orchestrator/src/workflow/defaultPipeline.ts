@@ -1,16 +1,18 @@
 import { exec as execCb } from "node:child_process";
-import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { relative } from "node:path";
-import type { RunEvent } from "@ma-office/shared";
+import { promisify } from "node:util";
+import type { OfficePlugin, PolicyPlugin, RunEvent, StagePlugin } from "@ma-office/shared";
 import { ArtifactWriter } from "../artifacts/writer.js";
 import type { JsonlEventLogger } from "../events/jsonlLogger.js";
 import { CodexMcpClient } from "../integrations/codexMcp.js";
+import type { PluginRegistry } from "../plugins/registry.js";
 import type { ProjectConfig } from "../types.js";
 
 const exec = promisify(execCb);
 
-const STAGES = ["SPEC", "IMPLEMENT", "TEST", "REVIEW", "GITHUB", "BLOG_FACTS"] as const;
+const BASE_STAGES = ["SPEC", "IMPLEMENT", "TEST", "REVIEW", "GITHUB", "BLOG_FACTS"] as const;
 
 type RunWorkflowArgs = {
   runId: string;
@@ -20,6 +22,7 @@ type RunWorkflowArgs = {
   config: ProjectConfig;
   logger: JsonlEventLogger;
   codexMock: boolean;
+  registry?: PluginRegistry;
 };
 
 function event(runId: string, type: RunEvent["type"], payload?: Record<string, unknown>, extras?: Partial<RunEvent>): RunEvent {
@@ -32,6 +35,41 @@ function event(runId: string, type: RunEvent["type"], payload?: Record<string, u
     ...(payload ? { payload } : {}),
     ...(extras ?? {})
   } as RunEvent;
+}
+
+function asStagePlugins(plugins: OfficePlugin[]): StagePlugin[] {
+  return plugins.filter((plugin): plugin is StagePlugin => plugin.kind === "stage");
+}
+
+function asPolicyPlugins(plugins: OfficePlugin[]): PolicyPlugin[] {
+  return plugins.filter((plugin): plugin is PolicyPlugin => plugin.kind === "policy");
+}
+
+export function resolvePipelineStages(stagePlugins: StagePlugin[]): string[] {
+  const stages = [...BASE_STAGES];
+
+  for (const plugin of stagePlugins) {
+    const stageName = plugin.stageName;
+    if (!stages.includes(stageName)) {
+      if (plugin.order?.before) {
+        const idx = stages.indexOf(plugin.order.before);
+        if (idx >= 0) {
+          stages.splice(idx, 0, stageName);
+          continue;
+        }
+      }
+      if (plugin.order?.after) {
+        const idx = stages.indexOf(plugin.order.after);
+        if (idx >= 0) {
+          stages.splice(idx + 1, 0, stageName);
+          continue;
+        }
+      }
+      stages.push(stageName);
+    }
+  }
+
+  return stages;
 }
 
 async function emitBlocked(logger: JsonlEventLogger, runId: string, stage: string, message: string, manualSteps: string[]): Promise<void> {
@@ -52,17 +90,54 @@ async function emitBlocked(logger: JsonlEventLogger, runId: string, stage: strin
   }
 }
 
+function buildBlogFacts(goal: string, patch: string): Record<string, unknown> {
+  const added = patch.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++ ")).length;
+  const removed = patch.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("--- ")).length;
+  const files = patch
+    .split("\n")
+    .filter((line) => line.startsWith("diff --git "))
+    .map((line) => line.split(" ")[2]?.replace("a/", ""))
+    .filter((line): line is string => Boolean(line));
+
+  return {
+    Context: `Goal: ${goal}`,
+    Problem: "Need reproducible summary material directly from code diff.",
+    Solution: "Generated structured facts from git patch metadata (files changed and line churn).",
+    "Key Code": files.slice(0, 5),
+    Lesson: `Track objective signals in CI artifacts (files=${files.length}, +${added}/-${removed}).`
+  };
+}
+
 export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
-  const { runId, runDir, projectPath, goal, config, logger, codexMock } = args;
+  const { runId, runDir, projectPath, goal, config, logger, codexMock, registry } = args;
   const artifactWriter = new ArtifactWriter(runDir);
   const codex = new CodexMcpClient({ mock: codexMock });
+  const plugins = registry?.list() ?? [];
+  const stagePlugins = asStagePlugins(plugins);
+  const policyPlugins = asPolicyPlugins(plugins);
+  const stages = resolvePipelineStages(stagePlugins);
 
   await logger.emit(event(runId, "run_started", { goal }));
 
-  for (const stage of STAGES) {
+  for (const stage of stages) {
     await logger.emit(event(runId, "stage_started", { stage }, { stage }));
-    const agentId = `${stage.toLowerCase()}-agent`;
 
+    const priorEvents = await logger.readAll();
+    for (const policy of policyPlugins) {
+      const result = await policy.evaluate({ runId, stage, events: priorEvents, goal });
+      if (!result.pass) {
+        await emitBlocked(logger, runId, stage, `Policy blocked stage ${stage}: ${result.reason ?? policy.policyName}`, [
+          "Review project policies and workflow plugins.",
+          "Adjust .ma-office/plugins or built-in policy settings.",
+          "Re-run the workflow after policy remediation."
+        ]);
+        await logger.emit(event(runId, "stage_finished", { stage, blockedBy: policy.policyName }, { stage, level: "warn" }));
+        await logger.emit(event(runId, "run_finished", { goal, status: "blocked" }));
+        return;
+      }
+    }
+
+    const agentId = `${stage.toLowerCase()}-agent`;
     await logger.emit(event(runId, "agent_spawned", { agentId, role: stage.toLowerCase(), task: `${stage} stage` }, { stage, agentId }));
     await logger.emit(event(runId, "agent_status", { status: "working", message: `${stage} started` }, { stage, agentId }));
 
@@ -77,11 +152,18 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
         await logger.emit(event(runId, "tool_call_started", { tool: "test_cmd", summary: config.test_cmd }, { stage, agentId }));
         const { stdout, stderr } = await exec(config.test_cmd, { cwd: projectPath });
         const testSummaryPath = await artifactWriter.write("test_summary.txt", `${stdout}\n${stderr}`.trim());
-        await logger.emit(event(runId, "artifact_created", {
-          artifactType: "test_summary",
-          path: relative(projectPath, testSummaryPath),
-          summary: "Test output"
-        }, { stage, agentId }));
+        await logger.emit(
+          event(
+            runId,
+            "artifact_created",
+            {
+              artifactType: "test_summary",
+              path: relative(projectPath, testSummaryPath),
+              summary: "Test output"
+            },
+            { stage, agentId }
+          )
+        );
         await logger.emit(event(runId, "tool_call_finished", { tool: "test_cmd", summary: "tests completed" }, { stage, agentId }));
       }
 
@@ -91,40 +173,64 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
         const diffCmd = `git diff ${base}...HEAD`;
         const { stdout } = await exec(diffCmd, { cwd: projectPath });
         const patchPath = await artifactWriter.write("blog_diff.patch", stdout);
-        await logger.emit(event(runId, "artifact_created", {
-          artifactType: "diff_patch",
-          path: relative(projectPath, patchPath),
-          summary: `Generated with ${diffCmd}`
-        }, { stage, agentId }));
+        await logger.emit(
+          event(
+            runId,
+            "artifact_created",
+            {
+              artifactType: "diff_patch",
+              path: relative(projectPath, patchPath),
+              summary: `Generated with ${diffCmd}`
+            },
+            { stage, agentId }
+          )
+        );
         await logger.emit(event(runId, "tool_call_finished", { tool: "git", summary: "blog diff generated" }, { stage, agentId }));
       }
 
       if (stage === "BLOG_FACTS") {
-        const summary = {
-          Context: "Reusable multi-agent office monorepo",
-          Problem: "Need project-agnostic workflow + observability + plugin extensibility",
-          Solution: "Implemented CLI/orchestrator/dashboard skeleton with strict stage gates and JSONL events",
-          "Key Code": [
-            "packages/shared/src/events.ts",
-            "packages/orchestrator/src/workflow/defaultPipeline.ts",
-            "packages/dashboard/lib/runs.ts"
-          ],
-          Lesson: "Keep integration seams stable and stub non-critical edges in PR1"
-        };
+        const patchPath = `${runDir}/artifacts/blog_diff.patch`;
+        const patch = await readFile(patchPath, "utf8").catch(() => "");
+        const summary = buildBlogFacts(goal, patch);
         const blogFactsPath = await artifactWriter.write("blog_facts.json", JSON.stringify(summary, null, 2));
-        await logger.emit(event(runId, "artifact_created", {
-          artifactType: "blog_facts",
-          path: relative(projectPath, blogFactsPath),
-          summary: "Blog facts exported"
-        }, { stage, agentId }));
+        await logger.emit(
+          event(
+            runId,
+            "artifact_created",
+            {
+              artifactType: "blog_facts",
+              path: relative(projectPath, blogFactsPath),
+              summary: "Blog facts exported"
+            },
+            { stage, agentId }
+          )
+        );
       }
 
-      await logger.emit(event(runId, "cost_update", {
-        model: codexMock ? "mock" : "gpt-5",
-        tokensIn: 0,
-        tokensOut: 0,
-        estimatedCost: 0
-      }, { stage, agentId }));
+      for (const plugin of stagePlugins.filter((plugin) => plugin.stageName === stage)) {
+        await plugin.run({
+          runId,
+          stageName: stage,
+          goal,
+          projectPath,
+          config: config as unknown as Record<string, unknown>,
+          emit: (e) => logger.emit(e)
+        });
+      }
+
+      await logger.emit(
+        event(
+          runId,
+          "cost_update",
+          {
+            model: codexMock ? "mock" : "gpt-5",
+            tokensIn: 0,
+            tokensOut: 0,
+            estimatedCost: 0
+          },
+          { stage, agentId }
+        )
+      );
 
       await logger.emit(event(runId, "agent_status", { status: "done", message: `${stage} complete` }, { stage, agentId }));
       await logger.emit(event(runId, "stage_finished", { stage }, { stage }));

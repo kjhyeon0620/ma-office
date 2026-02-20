@@ -1,0 +1,7 @@
+{
+  "Context": "Goal: phase2 verify",
+  "Problem": "Need reproducible summary material directly from code diff.",
+  "Solution": "Generated structured facts from git patch metadata (files changed and line churn).",
+  "Key Code": [],
+  "Lesson": "Track objective signals in CI artifacts (files=0, +0/-0)."
+}
