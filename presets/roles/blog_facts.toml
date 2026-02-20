@@ -1,0 +1,3 @@
+[role]
+name = "blog_facts"
+description = "Extracts Context/Problem/Solution/Key Code/Lesson from diff"

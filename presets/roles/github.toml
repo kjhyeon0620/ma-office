@@ -1,0 +1,3 @@
+[role]
+name = "github"
+description = "Prepares git branch/PR operations and artifacts"

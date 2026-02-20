@@ -1,0 +1,24 @@
+{
+  "name": "@ma-office/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "echo \"No dashboard tests in PR1\"",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@ma-office/shared": "workspace:*",
+    "next": "15.1.3",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2"
+  }
+}

@@ -1,0 +1,7 @@
+stages:
+  - SPEC
+  - IMPLEMENT
+  - TEST
+  - REVIEW
+  - GITHUB
+  - BLOG_FACTS

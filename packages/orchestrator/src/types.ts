@@ -1,0 +1,20 @@
+export type ProjectConfig = {
+  base_branch: string;
+  test_cmd: string;
+  lint_cmd: string;
+  format_cmd: string;
+  pr_template: string;
+  package_manager: "pnpm" | "npm" | "yarn";
+  plugins?: {
+    npm?: string[];
+  };
+};
+
+export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
+  base_branch: "main",
+  test_cmd: "pnpm test",
+  lint_cmd: "pnpm lint",
+  format_cmd: "pnpm -r format",
+  pr_template: ".github/pull_request_template.md",
+  package_manager: "pnpm"
+};
