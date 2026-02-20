@@ -10,6 +10,9 @@ import { loadPlugins } from "./plugins/loader.js";
 import { installPresets } from "./presets.js";
 import { DEFAULT_PROJECT_CONFIG, type ProjectConfig } from "./types.js";
 import { runDefaultPipeline } from "./workflow/defaultPipeline.js";
+import { resolveRuntimeConfig } from "./runtime/runtimeConfig.js";
+import type { RuntimeConfig } from "./runtime/runtimeConfig.js";
+import { RuntimeConfigError } from "./runtime/runtimeConfig.js";
 
 const program = new Command();
 const invocationCwd = process.env.INIT_CWD ?? process.cwd();
@@ -46,6 +49,43 @@ program
     await mkdir(runDir, { recursive: true });
     const logger = new JsonlEventLogger(join(runDir, "events.jsonl"));
     await logger.init();
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await resolveRuntimeConfig({
+        projectPath,
+        codexMockFlag: Boolean(opts.codexMock),
+        env: process.env
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = error instanceof RuntimeConfigError ? error.code : "UNKNOWN";
+      const now = new Date().toISOString();
+      await logger.emit({
+        id: randomUUID(),
+        runId,
+        ts: now,
+        level: "error",
+        type: "run_started",
+        payload: { goal: opts.goal }
+      });
+      await logger.emit({
+        id: randomUUID(),
+        runId,
+        ts: now,
+        level: "error",
+        type: "agent_status",
+        payload: { status: "blocked", message: `Runtime configuration failed [${code}]: ${message}` }
+      });
+      await logger.emit({
+        id: randomUUID(),
+        runId,
+        ts: now,
+        level: "error",
+        type: "run_finished",
+        payload: { goal: opts.goal, status: "blocked" }
+      });
+      throw error;
+    }
 
     await runDefaultPipeline({
       runId,
@@ -54,7 +94,7 @@ program
       goal: opts.goal,
       config,
       logger,
-      codexMock: Boolean(opts.codexMock),
+      runtimeConfig,
       registry
     });
 

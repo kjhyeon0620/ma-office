@@ -6,9 +6,11 @@ import { promisify } from "node:util";
 import type { OfficePlugin, PolicyPlugin, RolePlugin, RunEvent, StagePlugin, ToolPlugin, ToolRegistry, WidgetPlugin } from "@ma-office/shared";
 import { ArtifactWriter } from "../artifacts/writer.js";
 import type { JsonlEventLogger } from "../events/jsonlLogger.js";
-import { CodexMcpClient } from "../integrations/codexMcp.js";
+import { CodexEngineAdapter } from "../engines/codexEngineAdapter.js";
+import type { EngineActionError, EngineAdapter } from "../engines/types.js";
 import type { PluginRegistry } from "../plugins/registry.js";
 import type { ProjectConfig } from "../types.js";
+import type { RuntimeConfig } from "../runtime/runtimeConfig.js";
 
 const exec = promisify(execCb);
 
@@ -21,7 +23,9 @@ type RunWorkflowArgs = {
   goal: string;
   config: ProjectConfig;
   logger: JsonlEventLogger;
-  codexMock: boolean;
+  codexMock?: boolean;
+  runtimeConfig?: RuntimeConfig;
+  engineAdapter?: EngineAdapter;
   registry?: PluginRegistry;
 };
 
@@ -31,6 +35,41 @@ type PolicyDecision = {
   pass: boolean;
   reason?: string;
 };
+
+function normalizeFinalStatus(status: unknown): "blocked" | "error" {
+  return status === "blocked" ? "blocked" : "error";
+}
+
+function truncateSummary(summary: string, limit = 200): string {
+  if (summary.length <= limit) {
+    return summary;
+  }
+  return `${summary.slice(0, limit - 3)}...`;
+}
+
+function toArtifactEventPath(projectPath: string, outputPath: string): string {
+  const rel = relative(projectPath, outputPath);
+  if (!rel || rel.startsWith("..")) {
+    return outputPath;
+  }
+  return rel;
+}
+
+function buildManualFallback(
+  goal: string,
+  projectPath: string,
+  workdir: string,
+  commands: string[],
+  notes: string
+): { cwd: string; commands: string[]; notes: string } {
+  const escapedGoal = goal.replace(/"/g, '\\"');
+  const rerun = `MA_OFFICE_WORKDIR="${workdir}" pnpm --filter @ma-office/orchestrator dev -- run --goal "${escapedGoal}" --project "${projectPath}" --config project.yaml`;
+  return {
+    cwd: workdir,
+    commands: [...commands, rerun],
+    notes
+  };
+}
 
 function event(runId: string, type: RunEvent["type"], payload?: Record<string, unknown>, extras?: Partial<RunEvent>): RunEvent {
   return {
@@ -57,6 +96,12 @@ async function emitAgentNote(
     chosen?: string;
     why?: string;
     evidence?: string[];
+    mcp?: Record<string, unknown>;
+    manual?: {
+      cwd: string;
+      commands: string[];
+      notes: string;
+    };
   }
 ): Promise<void> {
   await logger.emit(
@@ -249,9 +294,21 @@ async function executeWidgetPlugins(
 }
 
 export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
-  const { runId, runDir, projectPath, goal, config, logger, codexMock, registry } = args;
+  const { runId, runDir, projectPath, goal, config, logger, runtimeConfig, registry } = args;
+  const codexMock = runtimeConfig ? runtimeConfig.mode === "mock" : args.codexMock !== false;
   const artifactWriter = new ArtifactWriter(runDir);
-  const codex = new CodexMcpClient({ mock: codexMock });
+  const effectiveConfig: ProjectConfig = runtimeConfig?.baseBranch
+    ? { ...config, base_branch: runtimeConfig.baseBranch }
+    : config;
+  const codexAdapter =
+    args.engineAdapter ??
+    (runtimeConfig?.mode === "real"
+      ? new CodexEngineAdapter({
+          command: runtimeConfig.mcpCommand,
+          cwd: runtimeConfig.workdir,
+          env: process.env
+        })
+      : undefined);
   const plugins = registry?.list() ?? [];
   const stagePlugins = asStagePlugins(plugins);
   const policyPlugins = asPolicyPlugins(plugins);
@@ -260,7 +317,12 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
   const widgetPlugins = asWidgetPlugins(plugins);
   const stages = resolvePipelineStages(stagePlugins);
   const policyDecisions: PolicyDecision[] = [];
+  let adapterShutdown = false;
   const finalizeRun = async (status?: "blocked" | "error"): Promise<void> => {
+    if (codexAdapter && !adapterShutdown) {
+      adapterShutdown = true;
+      await codexAdapter.shutdown().catch(() => undefined);
+    }
     await writePolicyReport(runId, projectPath, logger, artifactWriter, policyDecisions);
     await executeWidgetPlugins(runId, projectPath, logger, artifactWriter, widgetPlugins);
     await logger.emit(event(runId, "run_finished", status ? { goal, status } : { goal }));
@@ -279,11 +341,47 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
     );
   }
 
+  if (codexAdapter) {
+    try {
+      const init = await codexAdapter.initialize();
+      await logger.emit(
+        event(runId, "agent_note", {
+          noteType: "context",
+          message: `Codex MCP connected; discovered ${init.tools.length} tools.`,
+          mcp: init.mcp
+        })
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = error as EngineActionError;
+      await logger.emit(
+        event(runId, "agent_status", {
+          status: details.status ?? "blocked",
+          message: `Real mode startup failed: ${message}`
+        })
+      );
+      await logger.emit(
+        event(runId, "agent_note", {
+          noteType: "action",
+          message: "Codex MCP initialization failed; use manual fallback.",
+          mcp: details.mcp ?? { requestId: "startup", tool: "initialize", state: "error", errorCode: details.errorCode ?? "MCP_TRANSPORT" },
+          manual: details.manual ?? {
+            cwd: runtimeConfig.workdir,
+            commands: [runtimeConfig.mcpCommand, "codex login"],
+            notes: "Verify MCP command/auth, then rerun."
+          }
+        })
+      );
+      await finalizeRun(normalizeFinalStatus(details.status));
+      return;
+    }
+  }
+
   for (const stage of stages) {
     await logger.emit(event(runId, "stage_started", { stage }, { stage }));
 
     const priorEvents = await logger.readAll();
-    const builtInBlocked = builtInPolicyBlockReason(stage, config, priorEvents);
+    const builtInBlocked = builtInPolicyBlockReason(stage, effectiveConfig, priorEvents);
     if (builtInBlocked) {
       policyDecisions.push({ stage, source: "built-in-policy", pass: false, reason: builtInBlocked });
       await emitBlocked(logger, runId, stage, `Policy blocked stage ${stage}: ${builtInBlocked}`, [
@@ -322,7 +420,7 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
       why: "Keeps defaults stable while allowing per-project extension."
     });
 
-    const maxRetries = Math.max(0, config.policies?.max_retries_per_stage ?? 0);
+    const maxRetries = Math.max(0, effectiveConfig.policies?.max_retries_per_stage ?? 0);
     let attempt = 0;
     let stageComplete = false;
     while (!stageComplete) {
@@ -334,7 +432,7 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
           stageName: stage,
           goal,
           projectPath,
-          config: config as unknown as Record<string, unknown>,
+          config: effectiveConfig as unknown as Record<string, unknown>,
           tools,
           emit: (e) => logger.emit(e)
         });
@@ -356,21 +454,136 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
           why: "Default implementation channel in the pipeline."
         });
         await logger.emit(event(runId, "tool_call_started", { tool: "codex-mcp", summary: "implement changes" }, { stage, agentId }));
-        const result = await codex.runTask(goal);
-        await logger.emit(event(runId, "tool_call_finished", { tool: "codex-mcp", summary: result.summary }, { stage, agentId }));
-        await emitAgentNote(logger, runId, stage, agentId, "result", `Implementation response: ${result.summary}`, {
-          evidence: [result.summary]
-        });
+        if (codexAdapter) {
+          try {
+            const result = await codexAdapter.editFiles({
+              runId,
+              goal,
+              stage,
+              projectPath,
+              workdir: runtimeConfig?.workdir ?? projectPath
+            });
+            await logger.emit(event(runId, "tool_call_finished", { tool: "codex-mcp", summary: truncateSummary(result.summary) }, { stage, agentId }));
+            const implementOutput = (result.output ?? result.summary).trim();
+            if (implementOutput.length > 200) {
+              const outputPath = await artifactWriter.write("mcp_implement_output.txt", implementOutput);
+              await logger.emit(
+                event(
+                  runId,
+                  "artifact_created",
+                  {
+                    artifactType: "mcp_output",
+                    path: toArtifactEventPath(projectPath, outputPath),
+                    summary: "Raw MCP IMPLEMENT output"
+                  },
+                  { stage, agentId }
+                )
+              );
+            }
+            await emitAgentNote(logger, runId, stage, agentId, "result", `Implementation response: ${result.summary}`, {
+              evidence: [result.summary],
+              mcp: result.mcp
+            });
+          } catch (error) {
+            const details = error as EngineActionError;
+            const status = normalizeFinalStatus(details.status);
+            await emitAgentNote(logger, runId, stage, agentId, "action", `IMPLEMENT blocked/error: ${details.message}`, {
+              chosen: "manual fallback",
+              why: "MCP request could not complete within policy constraints.",
+              mcp: details.mcp ?? { requestId: "implement", tool: "codex", state: status, errorCode: details.errorCode },
+              manual:
+                details.manual ??
+                buildManualFallback(
+                  goal,
+                  projectPath,
+                  runtimeConfig?.workdir ?? projectPath,
+                  ["git status", "git diff"],
+                  `Apply IMPLEMENT changes manually for goal "${goal}", then rerun.`
+                )
+            });
+            throw error;
+          }
+        } else {
+          const summary = `mocked Codex MCP result for: ${goal}`;
+          await logger.emit(event(runId, "tool_call_finished", { tool: "codex-mcp", summary }, { stage, agentId }));
+          await emitAgentNote(logger, runId, stage, agentId, "result", `Implementation response: ${summary}`, {
+            evidence: [summary]
+          });
+        }
       }
 
       if (!replacedByRole && stage === "TEST") {
-        await emitAgentNote(logger, runId, stage, agentId, "action", `Run configured tests: ${config.test_cmd}`, {
-          chosen: config.test_cmd,
+        await emitAgentNote(logger, runId, stage, agentId, "action", `Run configured tests: ${effectiveConfig.test_cmd}`, {
+          chosen: effectiveConfig.test_cmd,
           why: "Project-level reproducible verification command."
         });
-        await logger.emit(event(runId, "tool_call_started", { tool: "test_cmd", summary: config.test_cmd }, { stage, agentId }));
-        const { stdout, stderr } = await exec(config.test_cmd, { cwd: projectPath });
-        const testSummaryPath = await artifactWriter.write("test_summary.txt", `${stdout}\n${stderr}`.trim());
+        await logger.emit(
+          event(
+            runId,
+            "tool_call_started",
+            {
+              tool: codexAdapter ? "codex-mcp" : "test_cmd",
+              summary: codexAdapter ? `run test via MCP: ${effectiveConfig.test_cmd}` : effectiveConfig.test_cmd
+            },
+            { stage, agentId }
+          )
+        );
+        let testOutput = "";
+        if (codexAdapter) {
+          try {
+            const result = await codexAdapter.runCommands({
+              runId,
+              goal,
+              stage,
+              projectPath,
+              workdir: runtimeConfig?.workdir ?? projectPath,
+              testCommand: effectiveConfig.test_cmd
+            });
+            testOutput = result.output ?? result.summary;
+            const testRawOutput = testOutput.trim();
+            if (testRawOutput.length > 200) {
+              const outputPath = await artifactWriter.write("mcp_test_output.txt", testRawOutput);
+              await logger.emit(
+                event(
+                  runId,
+                  "artifact_created",
+                  {
+                    artifactType: "mcp_output",
+                    path: toArtifactEventPath(projectPath, outputPath),
+                    summary: "Raw MCP TEST output"
+                  },
+                  { stage, agentId }
+                )
+              );
+            }
+            await emitAgentNote(logger, runId, stage, agentId, "result", "Codex executed TEST stage command(s).", {
+              evidence: [result.summary],
+              mcp: result.mcp
+            });
+          } catch (error) {
+            const details = error as EngineActionError;
+            const status = normalizeFinalStatus(details.status);
+            await emitAgentNote(logger, runId, stage, agentId, "action", `TEST blocked/error: ${details.message}`, {
+              chosen: "manual fallback",
+              why: "MCP request could not complete within policy constraints.",
+              mcp: details.mcp ?? { requestId: "test", tool: "codex", state: status, errorCode: details.errorCode },
+              manual:
+                details.manual ??
+                buildManualFallback(
+                  goal,
+                  projectPath,
+                  runtimeConfig?.workdir ?? projectPath,
+                  [effectiveConfig.test_cmd],
+                  `Run TEST command manually for goal "${goal}", then rerun.`
+                )
+            });
+            throw error;
+          }
+        } else {
+          const { stdout, stderr } = await exec(effectiveConfig.test_cmd, { cwd: projectPath });
+          testOutput = `${stdout}\n${stderr}`.trim();
+        }
+        const testSummaryPath = await artifactWriter.write("test_summary.txt", testOutput.trim());
         await logger.emit(
           event(
             runId,
@@ -383,7 +596,17 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
             { stage, agentId }
           )
         );
-        await logger.emit(event(runId, "tool_call_finished", { tool: "test_cmd", summary: "tests completed" }, { stage, agentId }));
+        await logger.emit(
+          event(
+            runId,
+            "tool_call_finished",
+            {
+              tool: codexAdapter ? "codex-mcp" : "test_cmd",
+              summary: codexAdapter ? truncateSummary(`tests completed via MCP (${effectiveConfig.test_cmd})`) : "tests completed"
+            },
+            { stage, agentId }
+          )
+        );
         await emitAgentNote(logger, runId, stage, agentId, "result", "Test command completed and summary artifact was generated.", {
           evidence: ["artifacts/test_summary.txt"]
         });
@@ -391,11 +614,11 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
 
       if (!replacedByRole && stage === "GITHUB") {
         await emitAgentNote(logger, runId, stage, agentId, "plan", "Generate diff patch for downstream blog facts.", {
-          chosen: `git diff origin/${config.base_branch}...HEAD`,
+          chosen: `git diff origin/${effectiveConfig.base_branch}...HEAD`,
           why: "Patch is the handoff artifact for blog extraction."
         });
         await logger.emit(event(runId, "tool_call_started", { tool: "git", summary: "generate blog diff patch" }, { stage, agentId }));
-        const base = `origin/${config.base_branch}`;
+        const base = `origin/${effectiveConfig.base_branch}`;
         const diffCmd = `git diff ${base}...HEAD`;
         const { stdout } = await exec(diffCmd, { cwd: projectPath });
         const patchPath = await artifactWriter.write("blog_diff.patch", stdout);
@@ -449,7 +672,7 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
           stageName: stage,
           goal,
           projectPath,
-          config: config as unknown as Record<string, unknown>,
+          config: effectiveConfig as unknown as Record<string, unknown>,
           tools,
           emit: (e) => logger.emit(e)
         });
@@ -475,13 +698,28 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
       stageComplete = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const details = error as EngineActionError;
+        const status = normalizeFinalStatus(details.status);
         if (stage === "GITHUB") {
           await emitBlocked(logger, runId, stage, "GitHub stage blocked.", [
-            `Ensure branch ${config.base_branch} exists on origin.`,
+            `Ensure branch ${effectiveConfig.base_branch} exists on origin.`,
             "Run: git fetch origin",
-            `Run: git diff origin/${config.base_branch}...HEAD > runs/${runId}/artifacts/blog_diff.patch`
+            `Run: git diff origin/${effectiveConfig.base_branch}...HEAD > runs/${runId}/artifacts/blog_diff.patch`
           ]);
           await logger.emit(event(runId, "stage_finished", { stage, error: message }, { stage, level: "error" }));
+          await finalizeRun("blocked");
+          return;
+        }
+
+        if (status === "blocked") {
+          await logger.emit(event(runId, "agent_status", { status: "blocked", message }, { stage, agentId, level: "warn" }));
+          await emitAgentNote(logger, runId, stage, agentId, "decision", `Stage blocked and will not retry: ${message}`, {
+            chosen: "fail-fast",
+            why: "Blocked errors (policy/approval/timeout) require manual remediation.",
+            mcp: details.mcp,
+            manual: details.manual
+          });
+          await logger.emit(event(runId, "stage_finished", { stage, error: message }, { stage, level: "warn" }));
           await finalizeRun("blocked");
           return;
         }
@@ -496,12 +734,14 @@ export async function runDefaultPipeline(args: RunWorkflowArgs): Promise<void> {
           continue;
         }
 
-        await logger.emit(event(runId, "agent_status", { status: "error", message }, { stage, agentId, level: "error" }));
+        await logger.emit(event(runId, "agent_status", { status, message }, { stage, agentId, level: status === "blocked" ? "warn" : "error" }));
         await emitAgentNote(logger, runId, stage, agentId, "decision", `Stage failed with error: ${message}`, {
           chosen: "fail",
-          why: "Retry budget exhausted."
+          why: "Retry budget exhausted.",
+          mcp: details.mcp,
+          manual: details.manual
         });
-        await logger.emit(event(runId, "stage_finished", { stage, error: message }, { stage, level: "error" }));
+        await logger.emit(event(runId, "stage_finished", { stage, error: message }, { stage, level: status === "blocked" ? "warn" : "error" }));
         await finalizeRun("error");
         return;
       }

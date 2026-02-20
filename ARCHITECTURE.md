@@ -21,3 +21,9 @@
 
 Stored as append-only JSONL for easy migration to SQLite/Postgres later.
 Policy evaluations are exported as `artifacts/policy_report.json`.
+
+## Engine adapters
+- Runtime mode: `mock | real` via `MA_OFFICE_MODE`.
+- Real mode uses an engine adapter boundary so stage execution is engine-agnostic.
+- Current implementation includes `CodexEngineAdapter` (MCP stdio) for `IMPLEMENT` and `TEST`.
+- Adapter extension points are explicit for future engines/stages (`plan/spec`, `editFiles`, `runCommands`, `review`, `gitOps`).
