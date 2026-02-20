@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type EventItem = {
   id: string;
@@ -112,6 +112,17 @@ export default function AgentConsole({ events }: { events: EventItem[] }) {
   }, [events]);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(agents[0]?.id);
+
+  useEffect(() => {
+    if (!agents.length) {
+      setSelectedAgentId(undefined);
+      return;
+    }
+
+    if (!selectedAgentId || !agents.some((agent) => agent.id === selectedAgentId)) {
+      setSelectedAgentId(agents[0]?.id);
+    }
+  }, [agents, selectedAgentId]);
 
   const selectedLogs = useMemo(() => {
     if (!selectedAgentId) {
